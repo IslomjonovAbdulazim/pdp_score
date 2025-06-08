@@ -70,6 +70,12 @@ class BotConfig:
         'my_progress': '📊 Mening natijam',
         'leaderboard': '🏆 Reytinglar',
 
+        # Role Selection buttons - For users with multiple roles
+        'select_admin_role': '👨‍💼 Admin sifatida kirish',
+        'select_teacher_role': '👨‍🏫 O\'qituvchi sifatida kirish',
+        'select_student_role': '👨‍🎓 Talaba sifatida kirish',
+        'switch_role': '🔄 Rolni o\'zgartirish',
+
         # Common navigation buttons used across all user types
         'back': '⬅️ Orqaga',
         'cancel': '❌ Bekor qilish',

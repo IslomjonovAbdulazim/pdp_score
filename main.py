@@ -8,7 +8,7 @@ from telegram.ext import (
 # Import our custom modules
 from database import db
 from config import config
-from auth import auth
+from auth.auth import auth
 from handlers.admin_handlers import admin_handlers, WAITING_TEACHER_NAME, WAITING_TEACHER_PHONE, CONFIRMING_DELETE
 from handlers.teacher_handlers import (
     teacher_handlers,
@@ -273,58 +273,170 @@ class EducationBot:
     async def _authenticate_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE, phone_number):
         """
         Core authentication logic that determines user type and shows appropriate interface.
-        This is where our educational system personalizes itself for each user.
+
+        This enhanced version elegantly handles dual-role scenarios. When someone has multiple
+        roles in the educational system (like being both an administrator and a teacher),
+        they get to choose which role they want to use for their current session.
+
+        Think of this like having different "work modes" - you can switch between being
+        a system administrator managing users, or being a teacher managing your classes,
+        but you focus on one role at a time for clarity and better user experience.
         """
         try:
             user_id = update.effective_user.id
 
-            # Determine user type through our authentication system
-            user_type = await auth.get_user_type(user_id, phone_number, update.message.bot)
+            # Determine user type through our enhanced authentication system
+            auth_result = await auth.get_user_type(user_id, phone_number, context.bot)
 
             # Store phone number for later use in workflows
             context.user_data['user_phone'] = phone_number
-            context.user_data['user_type'] = user_type
 
-            # Remove the contact keyboard
+            # Remove the contact keyboard - we'll show appropriate interface next
             await update.message.reply_text(
                 "✅ Telefon raqami qabul qilindi...",
                 reply_markup=ReplyKeyboardRemove()
             )
 
-            # Route to appropriate interface based on user type
-            if user_type == 'admin':
-                await update.message.reply_text(config.MESSAGES['welcome_admin'])
-                await admin_handlers.show_admin_menu(update, context)
-
-            elif user_type == 'teacher':
-                await update.message.reply_text(config.MESSAGES['welcome_teacher'])
-                await teacher_handlers.show_teacher_menu(update, context)
-
-            elif user_type == 'student':
-                await update.message.reply_text(config.MESSAGES['welcome_student'])
-                await student_handlers.show_student_menu(update, context)
-
-            else:
+            # Handle the authentication result
+            if auth_result is None:
                 # User not authorized - provide helpful guidance
                 await update.message.reply_text(
                     f"{config.MESSAGES['auth_failed']}\n\n"
                     f"{config.MESSAGES['contact_support']}"
                 )
+                return
+
+            # Check if this is a dual-role scenario
+            if isinstance(auth_result, dict) and auth_result.get('type') == 'dual_role':
+                # Store available roles and show selection interface
+                context.user_data['available_roles'] = auth_result['available_roles']
+                await self._show_role_selection(update, context, auth_result['available_roles'])
+                return
+
+            # Single role scenario - proceed directly to the appropriate interface
+            await self._activate_role(update, context, auth_result)
 
         except Exception as e:
             logger.error(f"Authentication error: {e}")
             await update.message.reply_text(config.MESSAGES['something_wrong'])
 
+    async def _show_role_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE, available_roles):
+        """
+        Display role selection interface for users with multiple roles.
+
+        This creates a clean, professional interface that allows users to choose
+        which capacity they want to work in for this session. The design philosophy
+        here is to make the choice clear and avoid confusion about current permissions.
+        """
+        # Create dynamic keyboard based on available roles
+        keyboard = []
+
+        role_descriptions = {
+            'admin': ('👨‍💼 Admin sifatida kirish', 'Tizimni boshqarish va o\'qituvchilarni yaratish'),
+            'teacher': ('👨‍🏫 O\'qituvchi sifatida kirish', 'Guruhlar va vazifalarni boshqarish'),
+            'student': ('👨‍🎓 Talaba sifatida kirish', 'Vazifalarni bajarish va natijalarni ko\'rish')
+        }
+
+        for role in available_roles:
+            if role in role_descriptions:
+                button_text, description = role_descriptions[role]
+                keyboard.append([KeyboardButton(button_text)])
+
+        reply_markup = ReplyKeyboardMarkup(
+            keyboard,
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+
+        # Create a welcoming message that explains the choice
+        role_list = []
+        for role in available_roles:
+            if role in role_descriptions:
+                _, description = role_descriptions[role]
+                role_list.append(f"• {description}")
+
+        message = (
+                f"🎯 Sizda bir necha rol mavjud!\n\n"
+                f"Quyidagi rollardan birini tanlang:\n" +
+                "\n".join(role_list) +
+                f"\n\nBu sessiya davomida tanlangan rol bilan ishlaysiz. "
+                f"Keyin boshqa rolga o'tish mumkin."
+        )
+
+        await update.message.reply_text(message, reply_markup=reply_markup)
+
+    async def _activate_role(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user_type):
+        """
+        Activate the selected role and show the appropriate interface.
+
+        This method centralizes the role activation logic, making it easy to
+        handle both single-role users and dual-role users who have made their selection.
+        """
+        context.user_data['user_type'] = user_type
+
+        # Route to appropriate interface based on user type
+        if user_type == 'admin':
+            await update.message.reply_text(config.MESSAGES['welcome_admin'])
+            await admin_handlers.show_admin_menu(update, context)
+
+        elif user_type == 'teacher':
+            await update.message.reply_text(config.MESSAGES['welcome_teacher'])
+            await teacher_handlers.show_teacher_menu(update, context)
+
+        elif user_type == 'student':
+            await update.message.reply_text(config.MESSAGES['welcome_student'])
+            await student_handlers.show_student_menu(update, context)
+
+    async def _handle_role_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Process role selection from users with multiple roles.
+
+        This method converts the user's button selection back into a role type
+        and activates the appropriate interface. It's designed to be intuitive
+        and provide immediate feedback about the selected role.
+        """
+        selected_text = update.message.text.strip()
+        available_roles = context.user_data.get('available_roles', [])
+
+        # Map button text back to role types
+        role_mapping = {
+            config.BUTTONS['select_admin_role']: 'admin',
+            config.BUTTONS['select_teacher_role']: 'teacher',
+            config.BUTTONS['select_student_role']: 'student'
+        }
+
+        selected_role = role_mapping.get(selected_text)
+
+        if selected_role and selected_role in available_roles:
+            # Valid role selection - activate it
+            await self._activate_role(update, context, selected_role)
+
+            # Clear the role selection data since it's no longer needed
+            context.user_data.pop('available_roles', None)
+        else:
+            # Invalid selection - ask them to try again
+            await update.message.reply_text(
+                "❌ Noto'g'ri tanlov. Iltimos, yuqoridagi tugmalardan birini bosing."
+            )
+
     async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         Handle general text messages for menu navigation and context-aware routing.
-        This is the traffic controller for our educational workflows.
+
+        This enhanced version includes intelligent handling of role selection for dual-role users.
+        The method acts as a traffic controller, examining the current context and user state
+        to determine the most appropriate response to their message.
         """
         text = update.message.text.strip()
         user_type = context.user_data.get('user_type')
 
         try:
-            # Main menu navigation buttons
+            # Priority 1: Handle role selection if user is in that state
+            if 'available_roles' in context.user_data:
+                await self._handle_role_selection(update, context)
+                return
+
+            # Priority 2: Main menu navigation buttons
             if text == config.COMMANDS['menu']:
                 await self._show_main_menu(update, context, user_type)
 
@@ -334,16 +446,54 @@ class EducationBot:
             elif text == config.BUTTONS['back_to_groups']:
                 await teacher_handlers.show_my_groups(update, context)
 
-            # Teacher group selection (dynamic text matching)
+            # Priority 3: Role switching for dual-role users
+            elif text == config.BUTTONS['switch_role']:
+                await self._handle_role_switch(update, context)
+
+            # Priority 4: Teacher group selection (dynamic text matching)
             elif user_type == 'teacher' and text.startswith('📚'):
                 await teacher_handlers.select_group(update, context)
 
-            # Handle unknown messages with helpful guidance
+            # Priority 5: Handle unknown messages with helpful guidance
             else:
                 await self._handle_unknown_message(update, context, user_type)
 
         except Exception as e:
             logger.error(f"Error handling text message: {e}")
+            await update.message.reply_text(config.MESSAGES['something_wrong'])
+
+    async def _handle_role_switch(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handle role switching for dual-role users.
+
+        This allows users who have multiple roles to switch between them without
+        having to restart their session. This is particularly useful for administrators
+        who also teach, as they might need to switch contexts frequently during their work.
+        """
+        # Check if user has the phone number stored (indicating they've been authenticated)
+        user_phone = context.user_data.get('user_phone')
+        if not user_phone:
+            await update.message.reply_text(
+                "❌ Avval telefon raqamingizni tasdiqlang. /start buyrug'ini yuboring."
+            )
+            return
+
+        # Re-authenticate to get current role options
+        try:
+            user_id = update.effective_user.id
+            auth_result = await auth.get_user_type(user_id, user_phone, context.bot)
+
+            if isinstance(auth_result, dict) and auth_result.get('type') == 'dual_role':
+                # Show role selection again
+                context.user_data['available_roles'] = auth_result['available_roles']
+                await self._show_role_selection(update, context, auth_result['available_roles'])
+            else:
+                # User only has one role now
+                await update.message.reply_text(
+                    "ℹ️ Sizda faqat bitta rol mavjud. Rol almashtirish kerak emas."
+                )
+        except Exception as e:
+            logger.error(f"Error in role switch: {e}")
             await update.message.reply_text(config.MESSAGES['something_wrong'])
 
     async def handle_grade_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -421,10 +571,11 @@ class EducationBot:
         This is the main entry point that brings our educational system to life.
         """
         logger.info("🚀 Education Bot ishga tushmoqda...")
-        logger.info(f"📚 Ta'lim tizimi tayyor! Bot nomeri: @{self.app.bot.username}")
 
         # Initialize database if needed
         db.init_database()
+
+        logger.info("📚 Ta'lim tizimi ishlamoqda!")
 
         # Start the bot with polling (good for development)
         self.app.run_polling(
